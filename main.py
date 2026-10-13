@@ -52,4 +52,50 @@ app.add_middleware(
 @app.post("/orders")
 async def create_order(request: Request):
     key = request.headers.get("idempotency-key")
-    if key and key in
+    if key and key in orders_by_key:
+        return JSONResponse(
+            status_code=200,
+            content=orders_by_key[key],
+            headers={"Idempotent-Replayed": "true"},
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    order = {
+        "id": f"ord_{uuid.uuid4().hex[:16]}",
+        "status": "created",
+        "created_at": time.time(),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+    if key:
+        orders_by_key[key] = order  # no await between check and store, so no race
+    return JSONResponse(status_code=201, content=order)
+
+
+def encode_cursor(offset: int) -> str:
+    return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode()
+
+
+def decode_cursor(cursor: str) -> int:
+    return int(json.loads(base64.urlsafe_b64decode(cursor.encode()))["o"])
+
+
+@app.get("/orders")
+async def list_orders(limit: int = 10, cursor: str | None = None):
+    limit = max(1, min(limit, TOTAL))
+    offset = 0
+    if cursor:
+        try:
+            offset = decode_cursor(cursor)
+            if not 0 <= offset <= TOTAL:
+                raise ValueError
+        except Exception:
+            return JSONResponse(status_code=400, content={"detail": "invalid cursor"})
+
+    ids = range(offset + 1, min(offset + limit, TOTAL) + 1)
+    items = [{"id": i, "status": "fulfilled"} for i in ids]
+    end = offset + len(items)
+    return {"items": items, "next_cursor": encode_cursor(end) if end < TOTAL else None}
